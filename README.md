@@ -11,7 +11,7 @@ The goal is to be able to download a shared chat link to local markdown file
 You can install the tool directly using `go install`:
 
 ```bash
-go install github.com/zodimo/download-ai-chat@latest
+go install github.com/zodimo/download-ai-chat/cmd/download-ai-chat@latest
 ```
 
 ## Usage
