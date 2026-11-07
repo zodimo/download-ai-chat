@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -47,11 +49,15 @@ const (
 	attachmentBodyClass   = "abbe3c45"
 )
 
-// attachmentLabelAttr marks an opened attachment with the name of the turn whose
-// card opened it. The attribute is not DeepSeek's: openAttachments adds it to the
-// page, so that the file can be matched to its card even though it shows one
-// file at a time.
+// attachmentLabelAttr marks an opened attachment with the label of the card that
+// opened it. The attribute is not DeepSeek's: openAttachments adds it to the page,
+// so that the file can be matched to its card even though it shows one file at a
+// time.
 const attachmentLabelAttr = "data-attachment"
+
+// attachmentIndexAttr marks an opened attachment with the position of its card on
+// the page, which is what matches a file to the turn that holds its card.
+const attachmentIndexAttr = "data-attachment-index"
 
 // maxAttachmentNameLen bounds the saved name of an attachment. The card shows the
 // start of the file's content as its name, which can be a whole paragraph.
@@ -113,7 +119,7 @@ func mkTurnProcessor(convID, url string) func(turns rod.Elements, attachmentsHTM
 			}
 
 			var attachmentRefs []string
-			parseAttachmentCards(doc, files, &attachmentRefs, &conv.Attachments)
+			parseAttachmentCards(doc, &files, &attachmentRefs, &conv.Attachments)
 			sections := renderTurn(doc, attachmentRefs)
 			if len(sections) == 0 {
 				continue
@@ -161,7 +167,8 @@ func parseTurn(turnHTML string) *html.Node {
 func renderParsedTurn(turn *html.Node) []string {
 	var attachmentRefs []string
 	var attachments []providers.Attachment
-	parseAttachmentCards(turn, nil, &attachmentRefs, &attachments)
+	var files []attachmentFile
+	parseAttachmentCards(turn, &files, &attachmentRefs, &attachments)
 	return renderTurn(turn, attachmentRefs)
 }
 
@@ -200,15 +207,16 @@ func renderTurn(turn *html.Node, attachmentRefs []string) []string {
 	return sections
 }
 
-// parseAttachmentCards replaces every attachment card of a parsed turn with the
-// reference to the file it links to, in the order the cards appear, so prompts
-// keep the files where the user attached them. It also appends each file to the
-// turn's attachments.
+// parseAttachmentCards consumes the opened files of a turn in the order the turn's
+// cards appear, replacing each card with a link to the file it opened. It appends
+// the files it consumes to the turn's attachments.
 //
 // The file's content is not on the page until the card is opened. openAttachments
 // opens the cards and reads the file of each from the viewer that the page shows
-// outside the conversation, keyed by the file's name.
-func parseAttachmentCards(turn *html.Node, files map[string][]byte, refs *[]string, attachments *[]providers.Attachment) {
+// outside the conversation. The files come back in card order rather than keyed by
+// their label, because two uploads can look alike: matching by position keeps each
+// file in the turn that holds its card.
+func parseAttachmentCards(turn *html.Node, files *[]attachmentFile, refs *[]string, attachments *[]providers.Attachment) {
 	var cards []*html.Node
 	collectNodesWithClass(turn, attachmentCardClass, &cards)
 
@@ -218,47 +226,82 @@ func parseAttachmentCards(turn *html.Node, files map[string][]byte, refs *[]stri
 			continue
 		}
 		name := strings.Join(strings.Fields(getText(label)), " ")
-		content, ok := files[name]
-		if !ok {
+		if len(*files) == 0 || (*files)[0].Card != name {
 			// Keep what the page shows in place of the file.
 			log.Printf("Warning: attachment %q could not be read: it was not opened", name)
 			continue
 		}
+		file := (*files)[0]
+		*files = (*files)[1:]
+		content := file.Content
+
 		fileName := attachmentFileName(strings.TrimSpace(getText(label)), strings.TrimSpace(getText(findByClass(card, attachmentMetaClass))))
 		fileName = uniqueAttachmentName(fileName, *attachments)
-		// The link target is encoded so a name with spaces or parentheses does
-		// not end the link early; the name itself stays readable.
-		*refs = append(*refs, fmt.Sprintf("[%s](%s)", fileName, url.PathEscape(fileName)))
 		*attachments = append(*attachments, providers.Attachment{Name: fileName, Content: content})
 
-		ref := &html.Node{Type: html.TextNode, Data: (*refs)[len(*refs)-1]}
-		card.Parent.InsertBefore(ref, card)
+		// The card becomes a link to the saved file. It is inserted as an anchor
+		// rather than as markdown text, because the converter escapes brackets in
+		// text: a prompt holding files would otherwise read "\[name](name)".
+		// The target is encoded, so a name with spaces or parentheses does not end
+		// the link early; the link text stays the file's name.
+		link := &html.Node{
+			Type: html.ElementNode,
+			Data: "a",
+			Attr: []html.Attribute{{Key: "href", Val: url.PathEscape(fileName)}},
+		}
+		link.AppendChild(&html.Node{Type: html.TextNode, Data: fileName})
+		card.Parent.InsertBefore(link, card)
 		removeNode(card)
+
+		*refs = append(*refs, fmt.Sprintf("[%s](%s)", fileName, url.PathEscape(fileName)))
 	}
 }
 
-// parseAttachmentFiles reads the files that openAttachments saved into the HTML
-// it handed back, keyed by the name of the file's card.
-func parseAttachmentFiles(attachmentsHTML string) map[string][]byte {
-	files := map[string][]byte{}
+// attachmentFile is one file that openAttachments read off the page, with the
+// label of the card that opened it.
+type attachmentFile struct {
+	Card    string
+	Content []byte
+}
+
+// parseAttachmentFiles reads the files that openAttachments saved into the HTML it
+// handed back. They are returned in the order their cards appear, so that a file
+// reaches the turn holding its card even when two uploads look alike.
+func parseAttachmentFiles(attachmentsHTML string) []attachmentFile {
 	if attachmentsHTML == "" {
-		return files
+		return nil
 	}
 	doc, err := html.Parse(strings.NewReader(attachmentsHTML))
 	if err != nil {
 		log.Printf("Warning: failed to parse the opened attachments: %v", err)
-		return files
+		return nil
 	}
-	// openAttachments keeps each opened file in a holder of its own, since the
-	// page drops an opened file once the next one is opened.
-	var holders []*html.Node
-	collectNodesWithClass(doc, openedAttachmentClass, &holders)
-	for _, holder := range holders {
-		name := getAttr(holder, attachmentLabelAttr)
-		if name == "" {
-			continue
+
+	type holder struct {
+		index int
+		file  attachmentFile
+	}
+	var holders []holder
+	var nodes []*html.Node
+	collectNodesWithClass(doc, openedAttachmentClass, &nodes)
+	for i, node := range nodes {
+		index := i
+		if n, err := strconv.Atoi(getAttr(node, attachmentIndexAttr)); err == nil {
+			index = n
 		}
-		files[name] = []byte(getText(findByClass(holder, attachmentBodyClass)))
+		holders = append(holders, holder{
+			index: index,
+			file: attachmentFile{
+				Card:    getAttr(node, attachmentLabelAttr),
+				Content: []byte(getText(findByClass(node, attachmentBodyClass))),
+			},
+		})
+	}
+	sort.Slice(holders, func(a, b int) bool { return holders[a].index < holders[b].index })
+
+	files := make([]attachmentFile, 0, len(holders))
+	for _, h := range holders {
+		files = append(files, h.file)
 	}
 	return files
 }
@@ -421,25 +464,28 @@ func openAttachments(page *rod.Page) (string, error) {
 			continue
 		}
 
-		sel := "." + attachmentViewerClass + " ." + attachmentBodyClass
+		sel := "." + attachmentViewerClass + " " + "." + attachmentBodyClass
 		// Copy the file out while it is on screen, into an element the turn
-		// processor reads, tagged with the name of the card that opened it.
+		// processor reads, tagged with the card that opened it: its label and its
+		// position on the page, which is what the turn holding it is matched by.
+		index := strconv.Itoa(i)
 		if err := rod.Try(func() {
 			page.Timeout(30 * time.Second).MustElement(sel)
 			page.MustEval(`(args) => {
-				const [sel, attr, name] = args;
+				const [sel, labelAttr, indexAttr, name, index] = args;
 				const body = document.querySelector(sel);
 				if (!body) return false;
 				const holder = document.createElement("div");
 				holder.className = "`+openedAttachmentClass+`";
-				holder.setAttribute(attr, name);
+				holder.setAttribute(labelAttr, name);
+				holder.setAttribute(indexAttr, index);
 				const copy = document.createElement("div");
 				copy.className = "`+attachmentBodyClass+`";
 				copy.textContent = body.textContent;
 				holder.appendChild(copy);
 				document.body.appendChild(holder);
 				return true;
-			}`, []any{sel, attachmentLabelAttr, name})
+			}`, []any{sel, attachmentLabelAttr, attachmentIndexAttr, name, index})
 		}); err != nil {
 			log.Printf("Warning: could not read attachment %q: %v", name, err)
 		}

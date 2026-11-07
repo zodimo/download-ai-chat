@@ -40,9 +40,9 @@ func loadAttachmentPage(t *testing.T) (*html.Node, []*html.Node) {
 }
 
 // openedFiles reads the fixture's viewer the way openAttachments hands the page's
-// files to the turn processor: as HTML keyed by the name of the card that
-// opened the file. It returns the files and that HTML.
-func openedFiles(t *testing.T, page *html.Node, turn *html.Node) (map[string][]byte, string) {
+// files to the turn processor: as HTML tagged with the card that opened the file.
+// It returns the files and that HTML.
+func openedFiles(t *testing.T, page *html.Node, turn *html.Node) ([]attachmentFile, string) {
 	t.Helper()
 
 	var viewers []*html.Node
@@ -60,6 +60,7 @@ func openedFiles(t *testing.T, page *html.Node, turn *html.Node) (map[string][]b
 		Attr: []html.Attribute{
 			{Key: "class", Val: openedAttachmentClass},
 			{Key: attachmentLabelAttr, Val: name},
+			{Key: attachmentIndexAttr, Val: "0"},
 		},
 	}
 	holder.AppendChild(copyNode(viewers[0]))
@@ -91,7 +92,7 @@ func TestAttachmentIsReferencedAndSaved(t *testing.T) {
 
 	var refs []string
 	var attachments []providers.Attachment
-	parseAttachmentCards(turn, files, &refs, &attachments)
+	parseAttachmentCards(turn, &files, &refs, &attachments)
 
 	if len(attachments) != 1 {
 		t.Fatalf("expected 1 attachment, got %d", len(attachments))
@@ -137,14 +138,57 @@ func TestAttachmentIsReferencedAndSaved(t *testing.T) {
 	}
 }
 
+// A prompt that holds both text and an uploaded file is the common shape: the
+// user typed around the file. The reference has to survive the converter as a
+// link there, not just in a turn that is nothing but the file.
+func TestAttachmentInsidePromptIsALink(t *testing.T) {
+	page, messages := loadAttachmentPage(t)
+	files, _ := openedFiles(t, page, messages[0])
+
+	// Rebuild the first message with the card inside a prompt.
+	turnHTML := renderHTML(t, messages[0])
+	turn, err := html.Parse(strings.NewReader(turnHTML))
+	if err != nil {
+		t.Fatalf("parse turn: %v", err)
+	}
+	card := findByClass(turn, attachmentCardClass)
+	prompt := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: userTurnClass}}}
+	inner := &html.Node{Type: html.ElementNode, Data: "div"}
+	inner.AppendChild(&html.Node{Type: html.TextNode, Data: "please review "})
+	card.Parent.RemoveChild(card)
+	inner.AppendChild(card)
+	prompt.AppendChild(inner)
+	turn.FirstChild.AppendChild(prompt)
+
+	var refs []string
+	var attachments []providers.Attachment
+	parseAttachmentCards(turn, &files, &refs, &attachments)
+	if len(attachments) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(attachments))
+	}
+	want := "TASK-Go-Native-Security-Sandbox-Architecture.txt"
+	wantRef := "[" + want + "](" + url.PathEscape(want) + ")"
+
+	md := strings.Join(renderTurn(turn, refs), "\n\n")
+	if !strings.Contains(md, "please review "+wantRef) {
+		t.Errorf("prompt does not link the attachment in place:\n%s", md)
+	}
+	// The converter escapes brackets it finds in text, which turns a hand-built
+	// reference into "\\[name](name)". The file must be a real link instead.
+	if strings.Contains(md, `\[`) || strings.Contains(md, `\]`) {
+		t.Errorf("attachment reference was escaped in the prompt:\n%s", md)
+	}
+}
+
 func TestAttachmentWithoutOpenedFileKeepsTheCard(t *testing.T) {
 	_, messages := loadAttachmentPage(t)
 	turn := messages[0]
 
 	// Nothing was opened, so the turn has no files to refer to.
+	var files []attachmentFile
 	var refs []string
 	var attachments []providers.Attachment
-	parseAttachmentCards(turn, nil, &refs, &attachments)
+	parseAttachmentCards(turn, &files, &refs, &attachments)
 
 	if len(attachments) != 0 || len(refs) != 0 {
 		t.Fatalf("expected no attachments, got %d attachments and %d references", len(attachments), len(refs))
@@ -231,6 +275,65 @@ func TestAttachmentFileName(t *testing.T) {
 				t.Errorf("attachmentFileName(%q, %q) = %q, want %q", tt.label, tt.meta, got, tt.want)
 			}
 		})
+	}
+}
+
+// Two uploads can look alike: both cards show the start of the file's content, so
+// two files that begin the same way have the same label. Each file still has to
+// reach the turn that holds its card, so the files are matched by the order their
+// cards appear rather than by their label.
+func TestLookAlikeAttachmentsStayInTheirOwnTurns(t *testing.T) {
+	card := func(label, meta, text string) *html.Node {
+		first := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: attachmentNameClass}}}
+		first.AppendChild(&html.Node{Type: html.TextNode, Data: label})
+		metaNode := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: attachmentMetaClass}}}
+		metaNode.AppendChild(&html.Node{Type: html.TextNode, Data: meta})
+		card := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: attachmentCardClass}}}
+		card.AppendChild(first)
+		card.AppendChild(metaNode)
+		prompt := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: userTurnClass}}}
+		inner := &html.Node{Type: html.ElementNode, Data: "div"}
+		inner.AppendChild(&html.Node{Type: html.TextNode, Data: text})
+		inner.AppendChild(card)
+		prompt.AppendChild(inner)
+		turn := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: "ds-message"}}}
+		turn.AppendChild(prompt)
+		return turn
+	}
+
+	// Two cards that look alike, in the order the page shows them.
+	files := []attachmentFile{
+		{Card: "# notes", Content: []byte("first file")},
+		{Card: "# notes", Content: []byte("second file")},
+	}
+	turns := []*html.Node{
+		card("# notes", "TXT 1KB", "first: "),
+		card("# notes", "TXT 1KB", "second: "),
+	}
+
+	// The attachments accumulate across the turns, as they do in the transcript.
+	var names []string
+	var collected []providers.Attachment
+	for i, turn := range turns {
+		var refs []string
+		parseAttachmentCards(turn, &files, &refs, &collected)
+		if len(collected) != i+1 {
+			t.Fatalf("turn %d: expected %d attachment(s), got %d", i+1, i+1, len(collected))
+		}
+		latest := collected[len(collected)-1]
+		names = append(names, latest.Name)
+		if got, want := string(latest.Content), []string{"first file", "second file"}[i]; got != want {
+			t.Errorf("turn %d holds %q, want %q", i+1, got, want)
+		}
+	}
+
+	// The files are alike by label, so the second gets a name that keeps it from
+	// overwriting the first in the artifacts folder.
+	if len(names) != 2 || names[0] == names[1] {
+		t.Errorf("attachment names = %q, want two different names", names)
+	}
+	if len(files) != 0 {
+		t.Errorf("%d file(s) were left unclaimed", len(files))
 	}
 }
 
