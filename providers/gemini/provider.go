@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/go-rod/rod"
 	downlaoder "github.com/zodimo/download-ai-chat/internal/downloader"
+	"github.com/zodimo/download-ai-chat/internal/markdown"
 	"github.com/zodimo/download-ai-chat/internal/urlhelper"
 	"github.com/zodimo/download-ai-chat/providers"
 	"golang.org/x/net/html"
@@ -37,7 +37,7 @@ func (gp *GeminiPlatform) ConvertToMarkdown(url string, debug bool) (*providers.
 
 	chatDownloader := downlaoder.NewDownloader(url, "user-query-content", debug)
 
-	return chatDownloader.Download("share-turn-viewer", mkTurnProcessor(convID, url))
+	return chatDownloader.Download("share-turn-viewer", mkTurnProcessor(convID, url), nil)
 }
 func (gp *GeminiPlatform) Name() string {
 	return providerName
@@ -47,8 +47,10 @@ func init() {
 	providers.Register(providerName, &GeminiPlatform{})
 }
 
-func mkTurnProcessor(convID, url string) func(turns rod.Elements) (*providers.ProcessedConversation, error) {
-	return func(turns rod.Elements) (*providers.ProcessedConversation, error) {
+// mkTurnProcessor renders the turns of a shared conversation. Gemini keeps all
+// of its content in the turns, so the HTML prepared outside them is unused.
+func mkTurnProcessor(convID, url string) func(turns rod.Elements, _ string) (*providers.ProcessedConversation, error) {
+	return func(turns rod.Elements, _ string) (*providers.ProcessedConversation, error) {
 
 		var sb strings.Builder
 		dateStr := time.Now().Format("2006-01-02 15:04:05")
@@ -67,7 +69,7 @@ func mkTurnProcessor(convID, url string) func(turns rod.Elements) (*providers.Pr
 				if err != nil {
 					log.Printf("Warning: could not get HTML for user turn: %v", err)
 				} else {
-					md, err := htmltomarkdown.ConvertString(preprocessHTML(html))
+					md, err := markdown.Convert(preprocessHTML(html))
 					if err != nil {
 						log.Printf("Warning: could not convert user HTML to markdown: %v", err)
 					} else {
@@ -93,7 +95,7 @@ func mkTurnProcessor(convID, url string) func(turns rod.Elements) (*providers.Pr
 				if err != nil {
 					log.Printf("Warning: could not get HTML for agent turn: %v", err)
 				} else {
-					md, err := htmltomarkdown.ConvertString(preprocessHTML(html))
+					md, err := markdown.Convert(preprocessHTML(html))
 					if err != nil {
 						log.Printf("Warning: could not convert agent HTML to markdown: %v", err)
 					} else {

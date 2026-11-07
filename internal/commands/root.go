@@ -60,6 +60,22 @@ var RootCmd = &cobra.Command{
 
 		fmt.Printf("Saved conversation to file: %s\n", outPath)
 
+		// The markdown links to the files the user uploaded, which sit next to
+		// it in a folder named after it.
+		if len(processedConveration.Attachments) > 0 {
+			artifactsDir := filepath.Join(outDir, strings.TrimSuffix(outFileName, ".md")+"-artifacts")
+			if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+				return fmt.Errorf("Could not create artifacts directory %q: %v", artifactsDir, err)
+			}
+			for _, attachment := range processedConveration.Attachments {
+				attachmentPath := filepath.Join(artifactsDir, attachment.Name)
+				if err := os.WriteFile(attachmentPath, attachment.Content, 0o644); err != nil {
+					return fmt.Errorf("Could not write attachment %q: %v", attachmentPath, err)
+				}
+			}
+			fmt.Printf("Saved %d attachment(s) to: %s\n", len(processedConveration.Attachments), artifactsDir)
+		}
+
 		return nil
 	},
 }

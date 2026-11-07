@@ -1,0 +1,61 @@
+<div class="_9663006" data-virtual-list-item-key="1">
+  <div class="d29f3d7d ds-message">
+    <div class="_158cea4"><div class="_967f3f9"><div class="e70accd6"># TASK Go-Native Security Sandbox Architecture (.txt</div><div></div></div><div class="_7103a25">TXT 2.48KB</div></div></div>
+  </div>
+</div>
+<div class="_9663006" data-virtual-list-item-key="2">
+  <div class="d29f3d7d ds-message">
+    <div class="e1675d8b ds-think-content"><div class="ds-markdown"><p>Thought about the task.</p></div></div>
+    <div class="ds-markdown ds-assistant-message-main-content"><p>Plan written.</p></div>
+  </div>
+</div>
+<div class="_9663006" data-virtual-list-item-key="3">
+  <div class="ds-think-content"><div class="a44e8e96 scrollable"><div class="abbe3c45"># TASK: Go-Native Security Sandbox Architecture (gVisor + nono Integration)
+
+You are an expert Systems &amp; Security Engineer specializing in Go, Linux Kernel ABIs, and sandbox isolation. 
+
+Your objective is to design and implement a Go-native, policy-based sandbox toolkit that unifies:
+1. **gVisor (`gvisor.dev/gvisor`)**: User-space kernel emulation (`pkg/sentry`) and network stack (`pkg/tcpip`).
+2. **nono (`github.com/nolabs-ai/nono`)**: Policy evaluation engine, path capability enforcement, and dynamic permission bounds.
+
+---
+
+## 1. ARCHITECTURAL REQUIREMENTS
+
+- **Language &amp; Runtime**: Pure Go (1.22+). No external binary subprocess dependencies for policy evaluation.
+- **Interception Vector**: Intercept system calls inside gVisor's `Sentry` prior to handler execution.
+- **Policy Engine**: Embed nono's rule evaluator as custom Go middleware wrapped around `kernel.SyscallTable`.
+- **Enforcement Domains**:
+  - **VFS / File Access**: Intercept `openat`, `unlinkat`, `renameat`, etc., returning `syserror.EACCES` or `syserror.ENOENT` when blocked by nono policy.
+  - **Network / Sockets**: Embed nono domain/IP filtering directly inside gVisor's Go-native `netstack` (`pkg/tcpip`).
+  - **Process Execution**: Inspect `execve` targets against policy caps.
+
+---
+
+## 2. DELIVERABLES REQUIRED
+
+Please provide a complete implementation plan and Go code snippets for:
+
+1. **Policy Middleware Package (`pkg/sandbox/middleware.go`)**:
+   - Define a `SyscallFilter` interface that bridges gVisor `*kernel.Task` metadata with nono policy evaluation structs.
+   - Implement error mapping between nono policy denials and gVisor `syserror.Error` types.
+
+2. **Custom Sentry Entrypoint (`cmd/sandbox-runtime/main.go`)**:
+   - Show how to import gVisor packages as standard Go library imports (`pkg/sentry/kernel`, `pkg/sentry/vfs`).
+   - Register custom syscall hooks on the target platform architecture table (e.g., `amd64` / `arm64`).
+
+3. **Network Interceptor (`pkg/sandbox/net_hook.go`)**:
+   - Hook into gVisor's internal netstack to perform domain-based TCP/UDP filtering based on active nono rules.
+
+4. **YAML/JSON Policy Profile Schema**:
+   - Write an example YAML policy schema mapping file paths, allowed CLI binary invocations, and network endpoints.
+
+---
+
+## 3. CONSTRAINTS &amp; STYLES
+
+- Write idiomatic, performance-conscious Go code.
+- Minimize memory allocations in the hot path of the syscall dispatch loop.
+- Provide clear error context mapping so sandboxed processes receive accurate POSIX return codes when policy blocks an action.</div></div>
+</div>
+</div>
